@@ -1,0 +1,570 @@
+\documentclass[]{IEEEtran}
+
+% Your packages go here
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{amsmath}
+\usepackage{xcolor}
+\usepackage{cuted}
+\usepackage{biblatex}
+ 
+%listings settings
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+\definecolor{codeblue}{rgb}{0,0.8,0.99}
+\definecolor{codeyellow}{rgb}{0.6,0.5,0}
+
+
+\lstdefinestyle{vim_like}{
+  backgroundcolor=\color{backcolour},   
+  commentstyle=\color{codegreen},
+  keywordstyle=\color{codeyellow},
+  numberstyle=\tiny\color{codegray},
+  stringstyle=\color{codepurple},
+  basicstyle=\ttfamily\footnotesize,
+  breakatwhitespace=false,         
+  breaklines=true,                 
+  captionpos=b,                    
+  keepspaces=true,                 
+  numbers=left,                    
+  numbersep=5pt,                  
+  showspaces=false,                
+  showstringspaces=false,
+  showtabs=false,                  
+  tabsize=2
+}
+\lstset{style=vim_like}
+\newcommand\todolist[1]{\textcolor{red}{#1}}
+\markboth{MC949/MO446 Computer Vision}{}
+
+\addbibresource{ref-project.bib}
+\begin{document}
+  \title{Project 3 - Structure from Motion}
+  \author{Iury Cleveston (RA 230216), Leonardo Rezende (RA 262953) and Thales Oliveira (RA 148051)
+    \thanks{ra230216@students.ic.unicamp.br, ra262953@students.ic.unicamp.br, ra148051@students.ic.unicamp.br}
+  }
+  \maketitle
+  
+  \begin{abstract}
+    In this project, we were given the task of reconstructing the 3D shape of objects in the real world from series of images. To fulfill the requirements, the implemented algorithm deals with mapping of keypoints within a frame, usage of Kanade-Lucas-Tomasi Tracking method for locating those keypoints in other frames and Structure From Motion (SfM) algorithm to map those keypoints to real world coordinates. Also the camera positions were supposed to be recovered. With the coordinates, a 3-D plotter was used to see the shape of the object. Even though the KLT implementation showed to be robust, the SfM algorithm was not correct enough to produce correct 3D shapes of the objects.
+  \end{abstract}
+  
+\section{Introduction}
+This work, developed by Group 8 of Computer Vision Course (2nd Semester/2019), has the goal of reconstructing the 3D shape of objects in the real world from a series of images (video). In this sense, it is desired to create a 3D plot structure to represent the original content. To do such task, based on a reference frame, it must process keypoints of the mapped structure, locate those keypoints on the following frames of the video (using the Kanade-Lucas-Tomasi Tracking method), and then execute the Structure from Motion (SfM) algorithm to obtain the 3D coordinates from the keypoints and the camera position in the world. Then, those 3D points can be saved properly into XYZ and PLY file formats to be visualized using some tool as open3d python package or MeshLab.
+
+\section{Implementation of the Pipeline}
+
+The pipeline was implemented in the file \textbf{src/world\_reconstruction.py} and the whole code is inside the class WorldReconstruction. This class implements the method \textit{execute()} which is called from the main file. Also, there is a method to save the point cloud as Polygon File Format (.ply) file. 
+
+The main steps performed in this class consist of:
+
+\begin{itemize}
+  \item Initialize the KLT;
+  \item Initialize the SfM;
+  \item Read frames from video;
+  \item Find the features using Harris Corner Detector for every 10 frames;
+  \item Compute the Optical Flow using KLT;
+  \item Compute the Structure from Motion;
+  \item Export the data as a point cloud.
+\end{itemize}
+
+The following sections explains in detail the implementation of these algorithms and the results achieved.
+
+\section{Harris Corner Detector}
+
+In this project, we used the method \textit{cv2.goodFeaturesToTrack} from OpenCV. This method uses a Harris Corner detector to provide the best keypoints to track from one frame to another. This detector looks for points whose gradient changes in both x and y-axis so it means that the point is a corner, as shown in Figure~\ref{fig:harris}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\hsize]{images/harris.png}
+    \caption{Harris Corner Detector. a) On a flat region -- no gradient. b) On a edge region -- gradient only in one direction. c) On a corner region -- gradient in both directions.}
+    \label{fig:harris}
+\end{figure}
+
+The selection of corners is a reliable way to track motion from different frames, because corners are regions of high energy, being easily detected by algorithm based on gradient.
+
+After applying the Harris Corner detector in our outside image sequence, we got the following keypoints, as shown in Figure~\ref{fig:keypoints}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.3\hsize]{images/detection-frame-2.jpg}
+    \includegraphics[width=0.3\hsize]{images/detection-frame-6.jpg}
+    \includegraphics[width=0.3\hsize]{images/detection-frame-11.jpg}
+    \caption{Frames from our outside sequence with their respective keypoints. a) Frame 2. b) Frame 6. c) Frame 11.}
+    \label{fig:keypoints}
+\end{figure}
+
+We can see that several keypoints were detected in all the frames, some of them remained the same for the whole presented sequence, while others ended up being detected in the next frames. That is an expected result of this kind of algorithm because a corner point should provide gradients in both directions, even after transformations. However, we noticed that some of the keypoint does not belong to a corner region.
+
+The next section is going to present the tracking of these points without detecting them for every frame. That is, we are going to compute the optical flow for each keypoint and then track them using that direction vector.
+
+\section{Kanade-Lucas-Tomasi Tracking (KLT)}
+\label{sec:klt}
+
+The Kanade-Lucas-Tomasi Tracking (KLT) is an algorithm used to compute the optical flow given a pair of frames. In this project, we implemented the KLT and used the keypoints detected by the Harris Corner detector to compute the optical flow. The code is implemented inside the \textbf{src/klt.py} file and represented by the KLT Class. This class has a public method call \textit{calc()}, which is called from the \textit{WorldReconstruction} class.
+
+This algorithm works by assuming that the keypoints across frames move in a specific direction $(u, v)$, the algorithm's goal is to find this vector and apply it on each keypoint. The conception of this algorithm takes into account an assumption called the brightness constancy and is given by:
+
+\begin{equation}
+I(x, y, t) = I(x+u, y+v, t+1)
+\end{equation}
+
+The vector $(u, v)$ represents the direction of change from one frame to another. This equation is found by a Taylor expansion. After that, we use the following equation to calculate the vector of variation for every keypoint $p_i$:
+
+\begin{equation}
+0 = I_t(p_i) + \nabla I(p_i) 
+\begin{bmatrix}
+u \\ 
+v
+\end{bmatrix}
+\end{equation}
+
+One issue that arises from the previous equation is that we have two variables. To solve that, it is assumed that a neighborhood around the keypoint moves in the same direction. In this sense, we considered a neighborhood of size 15x15 and got fifteen more equations to solve for $u$ and $v$.
+
+After defining the region around the point, we calculate the gradient to find how much that region changed. We compare that region with the region of the next frame and get a direction of variation. The final matrix computations is defined by:
+
+\begin{equation}
+\begin{bmatrix}
+\sum{I_x I_x} & \sum{I_x I_y} \\ 
+ \sum{I_x I_y}  & \sum{I_y I_y} 
+\end{bmatrix} \begin{bmatrix}
+u \\ v
+\end{bmatrix}
+= -
+\begin{bmatrix}
+\sum{I_x I_t} \\ 
+\sum{I_y I_t}
+\end{bmatrix}
+\end{equation}
+
+In the previous equation, we need to get the inverse matrix. For avoiding the cases where the inverse is not possible to be found, we used the pseudo-inverse function. 
+
+Also, when looking for the region on the next frame, we implemented an interpolation, because the algorithm uses an iterative process to approximate the vector $(u, v)$, as shown in Listing~\ref{code:klt}.
+
+\begin{lstlisting}[language=Python, caption={Kanade-Lucas-Tomasi Tracking Algorithm.}, label={code:klt}]
+ def _calc(self, previous, current, x, y):
+        v = np.array([0., 0.])
+        w = self.size[0]
+        h = self.size[1]
+        neighbor = previous[y:y+h, x:x+w]
+        if neighbor.shape == self.size:
+            x_diff, y_diff = np.gradient(neighbor)
+            gradients = np.array([x_diff.flatten(),
+                                y_diff.flatten()])
+            z = np.dot(gradients, gradients.T)
+            z_inverse = np.linalg.pinv(z)
+            iteration = 0
+            win_x = np.arange(x, x+w)
+            win_y = np.arange(y, y+h)
+            x_arr = np.arange(0, current_image.shape[1])
+            y_arr = np.arange(0, current_image.shape[0])
+            interpolated = interpolate.interp2d(x_arr, y_arr, current, kind='cubic')
+            while iteration < self.max_iteration:
+                iteration += 1
+                t_win = interpolated(win_x + v[1],
+                                    win_y + v[0])
+                i_k = (neighbor - t_win).flatten()
+                b = -1 * np.dot(gradients, i_k)
+                n = np.dot(z_inverse, b)
+                v += n
+                if np.sqrt(n[0]**2 + n[1]**2) <= self.min_error:
+                    break
+        return v
+\end{lstlisting}
+
+For our implementation, we use 3 iterations with a minimum error of 0.01, calculated using the Euclidian distance. With this configuration, we were able to achieve similar results as those presented by OpenCV with the same parameters.
+
+Also, the optical flow enables us to predict the position of keypoints, and avoid detection for every frame, although it is not very precise. One way to increase the precision of this method is by implementing the Gaussian pyramids, to improve the computation for different scales.
+
+After running our KLT implementation, we got the results presented in Figure~\ref{fig:optical-flow}. The arrows represent the vector $(u, v)$ for each keypoint.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.3\hsize]{images/optical-frame-3.jpg}
+    \includegraphics[width=0.3\hsize]{images/optical-frame-8.jpg}
+    \includegraphics[width=0.3\hsize]{images/optical-frame-27.jpg}
+    \caption{Optical Flow computed by KLT. a) Frame 3. b) Frame 8. c) Frame 27.}
+    \label{fig:optical-flow}
+\end{figure}
+
+From the previous figure, we can notice that the arrows correctly indicate the movement of the keypoints. However, problems appear when there is a big change from one frame to another, or when the movement is bigger than the considered window size.
+
+One problem that arises then tracking the points for building a structure from motion is that all keypoints are not possible to be detected in all frames. To tackle this issue, we are just detecting the keypoints every 10 frames, after the detection we calculate the optical flow for each point detected, so we don't lose them in between. After that, we repeat this process for more keypoints in the next 10 frames. Doing this, we guarantee that our sequence stays consistent to pass it to the struct from motion algorithm.
+
+\section{Structure from Motion}
+\label{sec:sfm}
+Based on keypoints (2D points) from different image frames, the goal of the SfM algorithm is to calculate the real world (3D) coordinates from the mapped objects. The file \textbf{src/sfm.py} implements the \textit{SFM} class, which has a public method called \textit{get\_keypoints\_and\_camera\_coordinates()} to calculate the 3D coordinates. In order to explain the algorithm, some steps on the digital image conversion from the real world and the transformations from one frame to the other will be visited in this subsection.
+
+\subsection{Real world coordinates to Image Coordinates}
+From the principles of image acquiring, it is known that when a digital image is obtained, some process of coordinate transformation is done to transform an image from the real world to a discretized 2D structure which computers can read and manipulate. Simplifying the process, the world data is converted to 3D camera coordinates, which is then converted to 2D image coordinates. Those conversions are done by linear transforms, where the parameters of the transforms depend on the position and orientation of the camera related to the world, the camera's focal length, optical center and skew coefficient. As they are linear transforms, they can be summed up to only one transform, so we can model the process as:
+
+\begin{equation}
+    P = MS,
+    \label{eq:sfm}
+\end{equation}
+which is equivalent to
+\begin{equation}
+    \begin{bmatrix}
+        x_{kp} \\ y_{kp}
+    \end{bmatrix} = 
+    \begin{bmatrix}
+        a & b & c & d \\
+        e & f & g & h \\
+    \end{bmatrix}.
+    \begin{bmatrix}
+        X_{kp} \\ Y_{kp} \\ Z_{kp} \\ 1
+        \label{eq:one-p-t}
+    \end{bmatrix}
+\end{equation}
+where P is the coordinate vector of a keypoint in an image, M is the transform matrix (motion) described before ($a$ to $h$ are the transform parameters), and S is the coordinate vector of a keypoint in the real world (shape). All coordinates information $(x, y, z)$ is encoded into $(x,y)$ image coordinates in the transform. Based on the type of projection and the number of Degrees of Freedom, this transformation is known as Projective Projection. It only preserves the lines and cross ratios from one frame to the other.
+\par If it is the case where there are $p$ keypoints mapped along $f$ different image frames, equation \ref{eq:one-p-t} can be generalized to
+\begin{equation}
+\begin{split}
+    \begin{bmatrix}
+        x_{11} & x_{12} & ... & x_{1p}
+        \\ x_{21} & x_{22} & ... & x_{2p} 
+        \\ ... & ... & ... 
+        \\ x_{f1} & y_{f2} & ... & y_{fp}
+        \\ y_{11} & y_{12} & ... & y_{1p}
+        \\ y_{21} & y_{22} & ... & y_{2p} 
+        \\ ... & ... & ... 
+        \\ y_{f1} & y_{f2} & ... & y_{fp}
+    \end{bmatrix} = \\
+    \begin{bmatrix}
+        a_{1} & b_{1} & c_{1} & d_{1} \\
+        a_{2} & b_{2} & c_{2} & d_{2} \\
+        ... & ... & ... & ... \\
+        a_{f} & b_{f} & c_{f} & d_{f} \\
+        e_{1} & f_{1} & g_{1} & h_{1} \\
+        e_{2} & f_{2} & g_{2} & h_{2} \\
+        ... & ... & ... & ... \\
+        e_{f} & f_{f} & g_{f} & h_{f} \\
+    \end{bmatrix}.
+    \begin{bmatrix}
+        X_{1} & X_{2} & ... & X_{p}\\
+        Y_{1} & Y_{2} & ... & Y_{p}\\
+        Z_{1} & Z_{2} & ... & Z_{p}\\
+        1 & 1 & ... & 1
+    \end{bmatrix}
+\end{split}
+    \label{eq:gen-p-t}
+\end{equation}
+
+From equation \ref{eq:gen-p-t}, the solution of it for all parameters and coordinates ($a_{1}\ ...\ h_{f}$ and $X_{1}\ ...\ Z_{p}$) is one of the information pieces we need.
+
+\subsection{Relationship between number of keypoints and frames}
+\par It can be analyzed that when there are no \textit{a priori} information about the transform parameters (which is our case), all $M$ parameters are unknown and must be calculated. From \ref{eq:one-p-t}, we can see that we have no enough information for solving the system (2 known points, $x_{kp}$ and $y_{kp}$ for 11 incognitos, $a\ ...\ h$ and $X_{kp},\ Y_{kp},\ Z_{kp}$).
+\par Therefore, for each frame, we have associated to it 8 incognitos. For each keypoint, we have 3 incognitos. For each keypoint-frame pair, we are given 2 values. Therefore, to solve the \ref{eq:sfm} equation, the system must follow the constraint:
+
+\begin{equation}
+    2fp \geq 8f + 3p,
+\end{equation}
+where $f$ is the number of frames and $p$ is the number of keypoints. For example, for only $2$ frames, there must be at least $16$ keypoints to solve the system.
+\par Listing \ref{code:fp-check} shows the check implementation in code. 
+\begin{lstlisting}[language=Python, caption={SfM Parameter Check in initialization.}, label={code:fp-check}]
+def __init__(self, n_frames, n_keypoints):
+    if 2*(n_frames*n_keypoints) < ((8*n_frames) + (3*n_keypoints)):
+        print("Number of frames and keypoints must respect value/incognito ratio constraint")
+        sys.exit(0)
+    ...
+\end{lstlisting}
+
+
+\subsection{Solving the System of Equations}
+From the Literature, we have that the singular value decomposition (SVD) of the $P$ matrix can lead to te system's resolution. Factorizing $P$ with SVD, we have:
+
+\begin{equation}
+P = UWV^{T},
+\end{equation}
+and from those matrices we have the solution of the system as
+
+\begin{equation}
+\begin{split}
+    M = U_{4} \\ S = W_{4}V_{4}^{T},
+\end{split} \end{equation}
+
+where $U_{4}$ is built by taking the first 4 columns of $U$, $W_{4}$
+by taking the upper left 4x4 blocks of $W$, and $V_{4}$ by taking the first 4 columns of $V$.
+
+\par Listing \ref{code:p-m} shows the implementation of how the P matrix is built. From the original implementation of the method in the literature\cite{SFM}, the coordinates of the keypoints are normalized according to the mean value of each coordinate keypoint.
+
+\begin{lstlisting}[language=Python, caption={P matrix construction.}, label={code:p-m}]
+def _build_measurement_matrix(self, keypoints):
+
+    u = np.zeros(shape=(self.n_frames, self.n_keypoints), dtype=np.float32)
+    v = np.zeros(shape=(self.n_frames, self.n_keypoints), dtype=np.float32)
+    for row_idx, keypoint_set in enumerate(keypoints):
+        for col_idx, kp in enumerate(keypoint_set):
+            u[row_idx][col_idx] = kp[0]
+            v[row_idx][col_idx] = kp[1]
+
+    mean_rows_u = u.mean(1)
+    mean_rows_v = v.mean(1)
+
+    for idx, row in enumerate(u):
+        u[idx] = row/mean_rows_u[idx]
+
+    for idx, row in enumerate(v):
+        v[idx] = row/mean_rows_v[idx]
+
+    return np.concatenate((u, v))
+\end{lstlisting}
+
+\par Listing \ref{code:svd} shows the implementation of SVD and the calculation of the Motion ($M$) and Shape ($S$) matrices.  
+
+\begin{lstlisting}[language=Python, caption={System solving for M and S.}, label={code:svd}]
+def _factorize_measurement_matrix(self, meas_matrix):
+    w, u, vt = cv2.SVDecomp(meas_matrix)
+    u_4 = u[:, 0:4]
+    v_4 = np.transpose(vt)[:, 0:4]
+    w_4 = np.diag(np.ravel(w))[0:4, 0:4]
+
+    motion = u_4
+    shape = w_4.dot(np.transpose(v_4))
+
+    return motion, shape
+\end{lstlisting}
+
+The function call is done in the \textit{get\_keypoints\_and\_camera\_coordinates} function, as shown in listing \ref{code:gms}.
+
+\begin{lstlisting}[language=Python, caption={Factorization call}, label={code:gms}]
+def get_keypoints_and_camera_coordinates(self, keypoints):
+    ...
+    w = self._build_measurement_matrix(keypoints)
+    gen_motion, gen_shape = self._factorize_measurement_matrix(w)
+    ...
+\end{lstlisting}
+
+\subsection{Ambiguity Problem}
+\label{subsec:ambi}
+The parameters for $M$ and $S$ calculated in the previous subsection are not necessarily the solution for the problem. It is known that there exists a matrix $Q$ such as
+
+\begin{equation}
+\begin{split}
+    M = MQ \\
+    S = Q^{-1}S
+\end{split}
+\label{eq:ambiguity-sol}
+\end{equation}
+
+This problem is known as the ambiguity problem. The practical meaning of the previous equation is that the default system resolution does not resolve for scale, that is, we do not know the scaling factor of the done projections (an object projected by a camera might be very small and close to the camera, or might be very big and far from the camera).
+\par To solve the ambiguity problem, one strategy is to minimize through least squares:
+
+\begin{equation}
+        min_{L}||M_{i}LM_{i}^{T} - I||^{2}
+        \label{eq:lsq-full}
+\end{equation}
+where $M_{i}$ is the projective projection for the $i-th$ frame, since we want orthonormal axes. Finding $L$, $Q$ could be calculated using Cholesky decomposition\cite{MCOOK}, as $L = QQ^{T}$, if $L$ is a symmetric matrix.
+\par In order to apply least squares to \ref{eq:lsq-full}, solving for all $i$ frames, some matrix manipulation was done to have it in the $Ax\ -\ b$ form:
+
+\begin{equation}
+    \begin{split}
+        MLM^{T} - I = \\
+        MLM^{T}(M^{T})^{-1} - I(M^{T})^{-1} = \\
+        ML - (M^{T})^{-1}
+    \end{split}{}
+\end{equation}{}
+
+As the $M$ matrix has $2Fx4$ shape ($F$ being the number of frames), the pseudo inverse\cite{MCOOK} of $M_{i}^{T}$ was used:
+
+\begin{equation}
+    (M^{T})^{-1} \sim (MM^{T})^{-1}M
+\end{equation}{}
+
+Using the pseudo inverse, the least squares was applied. In the frames tested, the calculated $L$ was not a symmetric matrix, so the Cholesky decomposition was not possible. To overcome this challenge, with our instructor's help, the Bunch-Kaufman decomposition was applied to obtain $Q$. The amount of error in the process was always high ($QQ^{T} \neq L$ for all cases) leads to the conclusion that our method was unnefective to remove the ambiguity. 
+\par Listing \ref{code:ambiguity} shows the implementation of the method.
+\begin{lstlisting}[language=Python, caption={Ambiguity Solver.}, label={code:ambiguity}]
+def _eliminate_ambiguity(self, m):
+    m_transp = np.transpose(m)
+    pseudo_inverse = (np.linalg.inv(m.dot(m_transp))).dot(m)
+    lsq = np.linalg.lstsq(m, pseudo_inverse, rcond=None)[0]
+    # Bunch-Kaufman Decomposition provided by Professor Adin
+    l, d, p = sp.linalg.ldl(lsq)
+    # Try to obtain a corrected lower matrix through L sqrt(D), but it won't work every time since D can be negative in the indefinite case
+    fl = l @ np.sqrt(d)
+    if np.isnan(fl).any():
+        return l
+    return fl
+\end{lstlisting}
+
+As a continuation of \ref{code:gms}, listing \ref{code:gms2} shows the call for the ambiguity correction function.
+
+\begin{lstlisting}[language=Python, caption={Ambiguity Solver Call.}, label={code:gms2}]
+def get_keypoints_and_camera_coordinates(self, keypoints):
+    ...
+    projective_transforms = np.zeros(shape=(self.n_frames*2, 4), dtype=np.float32)
+    for i in range(self.n_frames):
+        projective_transforms[2*i] = gen_motion[i]
+        projective_transforms[(2*i) + 1] = gen_motion[i + self.n_frames]
+
+    q = self._eliminate_ambiguity(projective_transforms)
+    inv_q = np.linalg.inv(q)
+    ...
+\end{lstlisting}
+
+\subsection{Correcting Motion and Shape Matrices}
+After finding a correct $Q$ matrix, it can be used to solve equation \ref{eq:ambiguity-sol} and obtain the proper Motion and Shape matrices. Listing \ref{code:multiply-q} shows the construction of the motion matrix and the correction of it by $Q$. It also shows the correction of the shape matrix by $Q^{-1}$.
+
+\begin{lstlisting}[language=Python, caption={Correcting Ambiguity for Shape and Motion matrices.}, label={code:multiply-q}]
+def get_keypoints_and_camera_coordinates(self, keypoints):
+    ...
+    homogeneous_proj_transf = np.zeros(shape=(self.n_frames, 3, 4), dtype=np.float32)
+    for i in range(self.n_frames):
+        homogeneous_proj_transf[i][0] = projective_transforms[2*i]
+        homogeneous_proj_transf[i][1] = projective_transforms[(2*i) + 1]
+        homogeneous_proj_transf[i][2] = np.array([0, 0, 0, 1])
+
+    for idx, t in enumerate(homogeneous_proj_transf):
+        homogeneous_proj_transf[idx] = t.dot(q)
+
+    gen_shape = inv_q.dot(gen_shape)
+    ...
+\end{lstlisting}
+
+\subsection{Getting the Cameras Centers}
+The camera center coordinates with respect to each camera can be calculated directly from each projective projection matrix \cite{CLASS:CC}. Knowing that $M_{i}$ is the projection matrix of the $i-th$ frame, the $i-th$ camera center is equal to:
+
+\begin{equation}
+    C_{i} = -B_{i}^{-1}p_{4},
+\end{equation}{}
+where $B_{i}$ is formed by the first 3 columns of $M_{i}$, and $p_{4}$ if the fourth column of $M_{i}$. Listing \ref{code:cam-center} shows the implementation. Listing \ref{code:cam-call} shows the call for the function.
+
+\begin{lstlisting}[language=Python, caption={Camera center calculation.}, label={code:cam-center}]
+def _calculate_camera_centers(self, motion):
+
+    camera_centers = np.zeros(shape=(self.n_frames, 3))
+    for idx, proj_t in enumerate(motion):
+        p_inv = np.linalg.inv(proj_t[:, 0:3])
+        camera_centers[idx] = (-1*p_inv).dot(proj_t[:, 3])
+
+    return camera_centers
+\end{lstlisting}
+
+\begin{lstlisting}[language=Python, caption={Call for cameras centers calculation.}, label={code:cam-call}]
+def get_keypoints_and_camera_coordinates(self, keypoints):
+    ...
+    #calculates camera center based on motion matrices
+    camera_centers = self._calculate_camera_centers(homogeneous_proj_transf)
+    ...
+\end{lstlisting}
+
+\subsection{Normalizing the Shape Matrix}
+As the Shape matrix is in the form of homogeneous coordinates, the fourth coordinate must be always 1. To do so, the keypoints coordinates are normalized by its fourth values. The return of the SfM function is the keypoint coordinates and the camera center coordinates, as listed in \ref{code:sfm-return}.
+
+\begin{lstlisting}[language=Python, caption={Return of SfM main function.}, label={code:sfm-return}]
+def get_keypoints_and_camera_coordinates(self, keypoints):
+    ...
+    # fix the homogeneous coordinates
+    gen_shape = gen_shape/gen_shape[3, :]
+    return gen_shape[0:3, :], camera_centers
+\end{lstlisting}
+
+\section{Saving the 3D Structure}
+To save the points extracted using the SfM described at Section \ref{sec:sfm}, two file formats were chosen: \textbf{XYZ} and \textbf{Polygon File Format}. The first type is the simplest and can be just the letter \textbf{p} followed by the X, Y and Z values.
+The PLY expects an header with basics information about the 3D form. The Listing \ref{code:ply-format} shows the structure needed to save the project's result as PLY. The \textbf{N} at the line 3 tells how much points are stored in the file, as \textbf{K} is the number of faces (K=0 for a point cloud). Lines 4 to 9 specifies the information for each column and line 13 to EOF are the coordinates and the colour of every point.
+
+\begin{lstlisting}[caption={PLY file format structure.}, label={code:ply-format}]
+ply
+format ascii 1.0
+element vertex N
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+element face K
+property list uchar int vertex_indices
+end_header
+Xn Yn Zn Rn Gn Bn...
+\end{lstlisting}
+
+
+\section{Experiments and Discussion}
+
+The project's module for KLT showed some consistent results as showed in Section \ref{sec:klt} and at Fig. \ref{fig:optical-flow}. The SfM module finds the transformations and computes the points, but the point cloud generated seems to be with a lot of noise. Figures \ref{fig:i-2}, \ref{fig:i-3}, \ref{fig:i-4-2} and \ref{fig:i-5} shows the resulted point cloud to the respective inputs.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.175\hsize]{images/optical-flow-i-2.jpg}
+    \includegraphics[width=0.625\hsize]{images/0-2-b-snapshot00.png}
+    \caption{Point cloud resulted from SfM of input 2.}
+    \label{fig:i-2}
+\end{figure}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.21\hsize]{images/optical-flow-i-3.jpg}
+    \includegraphics[width=0.59\hsize]{images/0-3-snapshot.png}
+    \caption{Point cloud resulted from SfM of input 3.}
+    \label{fig:i-3}
+\end{figure}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.3\hsize]{images/optical-flow-i-4.jpg}
+    \includegraphics[width=0.5\hsize]{images/0-4-snapshot.png}
+    \caption{Point cloud resulted from SfM of input 4.}
+    \label{fig:i-4-2}
+\end{figure}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.195\hsize]{images/optical-flow-i-5.jpg}
+    \includegraphics[width=0.605\hsize]{images/0-5-snapshot00.png}
+    \caption{Point cloud resulted from SfM of input 5.}
+    \label{fig:i-5}
+\end{figure}
+
+Fig. \ref{fig:i-2} shows that the background keypoints are more evident than the building keypoints. The point cloud doesn't match the real scene at all. The orange point represent the camera positions, but they are not distributed in a circular formula (as the camera did around the building in the original scene). Also, the main problem about this input is that as the environment was quite irregular around the object, the camera moves up and down according to the steps of the camera holder, resulting in a more fuzzy optical flow. 
+
+The Fig. \ref{fig:i-3} shows a simpler version of the outside sample. An origami was filmed using the table as base to the camera. This video is more stable, but the point cloud seams to be very imprecise as the first one.
+
+Fig. \ref{fig:i-4-2} shows a video in the same setup as in Fig. \ref{fig:i-3}, but with a greater dimension of the frames. This better resolution added to a better contrast object leaded to way better keypoints, but the 3d representation got very noisy as well.
+
+The approach to eliminate ambiguities had problems finding a symmetric matrix using the least squares (described at \ref{subsec:ambi}). Some tests was done without the $Q$ matrix and the results are showed in the Figures \ref{fig:i-2wq} and \ref{fig:i-3wq}. It's interest to note that without the ambiguity correction, the resulting point clouds had a Z axis very close to zero, creating an almost flat form.
+\par From the tests, it is able to confirm that the SfM implementation is not correct nor robust. The lack of resolution for the ambiguity problems faced showed inaptitude to deal with the Linear Algebra constraints. The authors were also not sure about other possible flaws in the logic applied through the implemented algorithm.
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.4\hsize]{images/0-2-snapshot_withoutq-0.png}
+    \includegraphics[width=0.4\hsize]{images/0-2-snapshot_withoutq-1.png}
+    \caption{Result of SfM without the ambiguity correction using the building video input. The left image shows the point cloud using Z as depth. The right image is the result showing the Z axis variation}
+    \label{fig:i-2wq}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.4\hsize]{images/0-3-snapshot_withoutq-0.png}
+    \includegraphics[width=0.4\hsize]{images/0-3-snapshot_withoutq-1.png}
+    \caption{Result of SfM without the ambiguity correction using the building video input. The left image shows the point cloud using Z as depth (the point cloud has a very low density value). The right image is the result showing the Z axis variation}
+    \label{fig:i-3wq}
+\end{figure}
+
+
+\section{Contribution Matrix}
+
+The contribution of each author is presented below.
+
+\begin{table}[H]
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Task}                       & \textbf{Author} \\ \hline
+KLT Implementation                 & Iury      \\ \hline
+SfM Implementation                 & Thales          \\ \hline
+Data Acquiring for tests and 3D Plotting    & Leonardo          \\ \hline
+
+\end{tabular}
+\end{table}
+
+
+\section{Conclusion}
+
+In this work a 3D Reconstruction algorithm was implemented to extract a 3D point cloud representation of a scene given series of inputs in video. For this, a Kanade-Lucas-Tomasi tracking algorithm was implemented to calculate the optical flow using keypoints extracted with a Harris corner detector. Then, the output of KLT was passed into a Structure from Motion algorithm to calculate the position of each point in the 3D world. A series of approaches were applied to produce correct coordinates in the SfM algorithm, but they did not succeed. Consequentially, the algorithm did not reach a good 3D representation.
+
+\printbibliography
+
+
+\end{document}
